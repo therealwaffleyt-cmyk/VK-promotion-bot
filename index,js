@@ -1,0 +1,198 @@
+// index.js
+import 'dotenv/config';
+import { Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, InteractionType, EmbedBuilder } from 'discord.js';
+import { GoogleSpreadsheet } from 'google-spreadsheet';
+import { v4 as uuidv4 } from 'uuid';
+
+/* =======================
+   ENV VARIABLES
+======================= */
+const {
+  DISCORD_TOKEN,
+  APPLICATION_CHANNEL_ID,
+  OFFICER_CHANNEL_ID,
+  SHEET_ID,
+  SERVICE_ACCOUNT_JSON
+} = process.env;
+
+const SERVICE_ACCOUNT = JSON.parse(SERVICE_ACCOUNT_JSON);
+
+/* =======================
+   CONSTANTS
+======================= */
+const RANKS = [
+  'Master at Arms',
+  'Champion Knight',
+  'Red Knight',
+  'Knight Bachelor',
+  'Esquire',
+  'Squire'
+];
+
+const STATUS = {
+  PENDING: 'Pending',
+  APPROVED: 'Approved',
+  DENIED: 'Denied',
+  ROLLOVER: 'Rollover (1st Week)',
+  ESCALATED: 'Escalated (2nd Week)',
+  CRITICAL: 'Critical (3rd Week+)',
+  SPAM: 'Spam Timeout'
+};
+
+const OFFICER_ROLES = ['00 King', '02 Count', '03 Baron'];
+
+/* =======================
+   GOOGLE SHEET
+======================= */
+const doc = new GoogleSpreadsheet(SHEET_ID);
+
+async function getSheet() {
+  try {
+    await doc.useServiceAccountAuth({
+      client_email: SERVICE_ACCOUNT.client_email,
+      private_key: SERVICE_ACCOUNT.private_key.replace(/\\n/g, '\n'),
+    });
+    await doc.loadInfo();
+    return doc.sheetsByIndex[0];
+  } catch (err) {
+    console.error('Error connecting to Google Sheet:', err);
+    throw err;
+  }
+}
+
+/* =======================
+   CLIENT
+======================= */
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
+});
+
+/* =======================
+   UTILITIES
+======================= */
+function getNextRank(rank) {
+  const idx = RANKS.indexOf(rank);
+  return idx > 0 ? RANKS[idx - 1] : null;
+}
+
+function getHouseFromRoles(roles) {
+  const role = roles.find(r => r.name.startsWith('[dey '));
+  if (!role) return null;
+  return 'Dey ' + role.name.replace('[dey ', '').replace(']', '');
+}
+
+function hasOfficerPerms(roles) {
+  return roles.some(r => OFFICER_ROLES.includes(r.name));
+}
+
+/* =======================
+   READY
+======================= */
+client.once('ready', async () => {
+  console.log(`Logged in as ${client.user.tag}`);
+
+  const channel = await client.channels.fetch(APPLICATION_CHANNEL_ID);
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('apply')
+      .setLabel('Apply for Promotion Duel')
+      .setStyle(ButtonStyle.Primary)
+  );
+
+  await channel.send({
+    content: '**Promotion Duel Applications**\nSubmit before Monday 5:00 PM CST.',
+    components: [row]
+  });
+});
+
+/* =======================
+   INTERACTIONS
+======================= */
+client.on('interactionCreate', async interaction => {
+  // APPLY BUTTON
+  if (interaction.isButton() && interaction.customId === 'apply') {
+    const modal = new ModalBuilder()
+      .setCustomId('apply_modal')
+      .setTitle('Promotion Duel Application');
+
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('ign')
+          .setLabel('In-Game Name')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+      )
+    );
+
+    return interaction.showModal(modal);
+  }
+
+  // MODAL SUBMIT
+  if (interaction.type === InteractionType.ModalSubmit && interaction.customId === 'apply_modal') {
+    await interaction.deferReply({ ephemeral: true });
+
+    const memberRoles = interaction.member.roles.cache;
+    const house = getHouseFromRoles(memberRoles);
+    const currentRank = RANKS.find(r => memberRoles.some(role => role.name === r));
+    const targetRank = getNextRank(currentRank);
+
+    if (!house || !currentRank || !targetRank) {
+      return interaction.editReply('❌ Could not detect rank or house.');
+    }
+
+    const sheet = await getSheet();
+    await sheet.addRow({
+      TIMESTAMP: new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' }),
+      'APPLICANT DISCORD TAG': interaction.user.tag,
+      'APPLICANT HOUSE': house,
+      'CURRENT RANK': currentRank,
+      'TARGET RANK': targetRank,
+      STATUS: STATUS.PENDING,
+      REVIEWED: false,
+      'COOLDOWN ACTIVE': false,
+      'COOLDOWN UNTIL': '',
+      InternalID: uuidv4()
+    });
+
+    const officerChannel = await client.channels.fetch(OFFICER_CHANNEL_ID);
+
+    const embed = new EmbedBuilder()
+      .setTitle('New Promotion Duel Application')
+      .addFields(
+        { name: 'Applicant', value: interaction.user.tag },
+        { name: 'House', value: house },
+        { name: 'Current Rank', value: currentRank },
+        { name: 'Target Rank', value: targetRank }
+      )
+      .setTimestamp();
+
+    const buttons = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('approve').setLabel('Approve').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('deny').setLabel('Deny').setStyle(ButtonStyle.Danger)
+    );
+
+    await officerChannel.send({ embeds: [embed], components: [buttons] });
+
+    return interaction.editReply('✅ Application submitted.');
+  }
+
+  // APPROVE / DENY
+  if (interaction.isButton() && ['approve', 'deny'].includes(interaction.customId)) {
+    if (!hasOfficerPerms(interaction.member.roles.cache)) {
+      return interaction.reply({ content: '❌ Officer only.', ephemeral: true });
+    }
+
+    return interaction.update({
+      content: `✅ Application ${interaction.customId.toUpperCase()}D by ${interaction.user.tag}`,
+      components: [],
+      embeds: []
+    });
+  }
+});
+
+/* =======================
+   LOGIN
+======================= */
+client.login(DISCORD_TOKEN);
