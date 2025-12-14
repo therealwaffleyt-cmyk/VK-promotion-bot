@@ -3,21 +3,9 @@ import fs from 'fs';                    // <--- must be first
 import 'dotenv/config';
 import { Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, InteractionType, EmbedBuilder } from 'discord.js';
 import { GoogleSpreadsheet } from 'google-spreadsheet';
+import { JWT } from 'google-auth-library';
 import { v4 as uuidv4 } from 'uuid';
-const serviceAccountJson = `{
-  "type": "service_account",
-  "project_id": "smiling-wind-481103-f0",
-  "private_key_id": "88e905c21726616a26020d5a191f195dc24889a2",
-  "private_key": "-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDDuhi31hFVqkEr\\n...\\n-----END PRIVATE KEY-----\\n",
-  "client_email": "vk-bot@smiling-wind-481103-f0.iam.gserviceaccount.com",
-  "client_id": "112407298333590309826",
-  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-  "token_uri": "https://oauth2.googleapis.com/token",
-  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/vk-bot@smiling-wind-481103-f0.iam.gserviceaccount.com"
-}`;
-
-const SERVICE_ACCOUNT = JSON.parse(serviceAccountJson);
+const SERVICE_ACCOUNT = JSON.parse(fs.readFileSync('./service-account.json', 'utf8'));
 
 
 /* =======================
@@ -56,25 +44,43 @@ const STATUS = {
   SPAM: 'Spam Timeout'
 };
 
-const OFFICER_ROLES = ['00 King', '02 Count', '03 Baron'];
+const OFFICER_ROLES = ['King', 'Count', 'Baron'];
+
+const SPAM_LIMIT = 10;
+const spamTracker = new Map();
 
 /* =======================
    GOOGLE SHEET
 ======================= */
-const doc = new GoogleSpreadsheet(SHEET_ID);
+const serviceAuth = new JWT({
+  email: SERVICE_ACCOUNT.client_email,
+  key: SERVICE_ACCOUNT.private_key.replace(/\\n/g, '\n'),
+  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+});
+
+const doc = new GoogleSpreadsheet(SHEET_ID, serviceAuth);
 
 async function getSheet() {
   try {
-    await doc.useServiceAccountAuth({
-      client_email: SERVICE_ACCOUNT.client_email,
-      private_key: SERVICE_ACCOUNT.private_key.replace(/\\n/g, '\n'),
-    });
     await doc.loadInfo();
     return doc.sheetsByIndex[0];
   } catch (err) {
     console.error('Error connecting to Google Sheet:', err);
     throw err;
   }
+}
+
+async function findRowByInternalId(sheet, internalId) {
+  const rows = await sheet.getRows();
+  return rows.find(row => row.get('InternalID') === internalId);
+}
+
+async function hasExistingPendingApplication(sheet, discordTag) {
+  const rows = await sheet.getRows();
+  return rows.some(row => 
+    row.get('APPLICANT DISCORD TAG') === discordTag && 
+    row.get('STATUS') === STATUS.PENDING
+  );
 }
 
 /* =======================
@@ -100,6 +106,19 @@ function getHouseFromRoles(roles) {
 
 function hasOfficerPerms(roles) {
   return roles.some(r => OFFICER_ROLES.includes(r.name));
+}
+
+function checkSpamLimit(userId) {
+  const count = spamTracker.get(userId) || 0;
+  if (count >= SPAM_LIMIT) {
+    return true;
+  }
+  spamTracker.set(userId, count + 1);
+  return false;
+}
+
+function resetSpamCount(userId) {
+  spamTracker.delete(userId);
 }
 
 /* =======================
@@ -150,19 +169,41 @@ client.on('interactionCreate', async interaction => {
   if (interaction.type === InteractionType.ModalSubmit && interaction.customId === 'apply_modal') {
     await interaction.deferReply({ ephemeral: true });
 
+    const userId = interaction.user.id;
+    const ign = interaction.fields.getTextInputValue('ign');
+    
+    if (checkSpamLimit(userId)) {
+      return interaction.editReply('❌ You have been temporarily blocked from submitting applications due to spam.');
+    }
+
     const memberRoles = interaction.member.roles.cache;
+    const roleNames = memberRoles.map(r => r.name);
+    console.log('User roles:', roleNames);
+    
     const house = getHouseFromRoles(memberRoles);
     const currentRank = RANKS.find(r => memberRoles.some(role => role.name === r));
     const targetRank = getNextRank(currentRank);
+    
+    console.log('Detected - House:', house, 'Current Rank:', currentRank, 'Target Rank:', targetRank);
 
     if (!house || !currentRank || !targetRank) {
-      return interaction.editReply('❌ Could not detect rank or house.');
+      return interaction.editReply(`❌ Could not detect rank or house. Your roles: ${roleNames.join(', ')}`);
     }
 
     const sheet = await getSheet();
+    
+    if (ign.toLowerCase() !== 'test') {
+      const hasPending = await hasExistingPendingApplication(sheet, interaction.user.tag);
+      if (hasPending) {
+        return interaction.editReply('❌ You already have a pending application. Please wait for it to be reviewed.');
+      }
+    }
+
+    const internalId = uuidv4();
     await sheet.addRow({
       TIMESTAMP: new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' }),
       'APPLICANT DISCORD TAG': interaction.user.tag,
+      'IN-GAME NAME': ign,
       'APPLICANT HOUSE': house,
       'CURRENT RANK': currentRank,
       'TARGET RANK': targetRank,
@@ -170,8 +211,10 @@ client.on('interactionCreate', async interaction => {
       REVIEWED: false,
       'COOLDOWN ACTIVE': false,
       'COOLDOWN UNTIL': '',
-      InternalID: uuidv4()
+      InternalID: internalId
     });
+
+    resetSpamCount(userId);
 
     const officerChannel = await client.channels.fetch(OFFICER_CHANNEL_ID);
 
@@ -179,15 +222,17 @@ client.on('interactionCreate', async interaction => {
       .setTitle('New Promotion Duel Application')
       .addFields(
         { name: 'Applicant', value: interaction.user.tag },
+        { name: 'In-Game Name', value: ign },
         { name: 'House', value: house },
         { name: 'Current Rank', value: currentRank },
         { name: 'Target Rank', value: targetRank }
       )
+      .setFooter({ text: `ID: ${internalId}` })
       .setTimestamp();
 
     const buttons = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('approve').setLabel('Approve').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId('deny').setLabel('Deny').setStyle(ButtonStyle.Danger)
+      new ButtonBuilder().setCustomId(`approve_${internalId}`).setLabel('Approve').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`deny_${internalId}`).setLabel('Deny').setStyle(ButtonStyle.Danger)
     );
 
     await officerChannel.send({ embeds: [embed], components: [buttons] });
@@ -195,14 +240,47 @@ client.on('interactionCreate', async interaction => {
     return interaction.editReply('✅ Application submitted.');
   }
 
-  // APPROVE / DENY
-  if (interaction.isButton() && ['approve', 'deny'].includes(interaction.customId)) {
+  // APPROVE / DENY (supports both legacy 'approve'/'deny' and new 'approve_<id>'/'deny_<id>' formats)
+  if (interaction.isButton() && (
+    interaction.customId === 'approve' || 
+    interaction.customId === 'deny' || 
+    interaction.customId.startsWith('approve_') || 
+    interaction.customId.startsWith('deny_')
+  )) {
     if (!hasOfficerPerms(interaction.member.roles.cache)) {
       return interaction.reply({ content: '❌ Officer only.', ephemeral: true });
     }
 
+    const customId = interaction.customId;
+    const isLegacy = customId === 'approve' || customId === 'deny';
+    const action = isLegacy ? customId : customId.split('_')[0];
+    const internalId = isLegacy ? null : customId.split('_')[1];
+    
+    const newStatus = action === 'approve' ? STATUS.APPROVED : STATUS.DENIED;
+    const actionText = action === 'approve' ? 'APPROVED' : 'DENIED';
+
+    if (internalId) {
+      try {
+        const sheet = await getSheet();
+        const row = await findRowByInternalId(sheet, internalId);
+        
+        if (row) {
+          row.set('STATUS', newStatus);
+          row.set('REVIEWED', true);
+          row.set('REVIEWED BY', interaction.user.tag);
+          row.set('REVIEWED AT', new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' }));
+          await row.save();
+          console.log(`Application ${internalId} updated to ${newStatus}`);
+        } else {
+          console.error(`Could not find row with InternalID: ${internalId}`);
+        }
+      } catch (err) {
+        console.error('Error updating sheet:', err);
+      }
+    }
+
     return interaction.update({
-      content: `✅ Application ${interaction.customId.toUpperCase()}D by ${interaction.user.tag}`,
+      content: `✅ Application ${actionText} by ${interaction.user.tag}`,
       components: [],
       embeds: []
     });
