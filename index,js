@@ -1,8 +1,24 @@
 // index.js
+import fs from 'fs';                    // <--- must be first
 import 'dotenv/config';
 import { Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, InteractionType, EmbedBuilder } from 'discord.js';
 import { GoogleSpreadsheet } from 'google-spreadsheet';
 import { v4 as uuidv4 } from 'uuid';
+const serviceAccountJson = `{
+  "type": "service_account",
+  "project_id": "smiling-wind-481103-f0",
+  "private_key_id": "88e905c21726616a26020d5a191f195dc24889a2",
+  "private_key": "-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDDuhi31hFVqkEr\\n...\\n-----END PRIVATE KEY-----\\n",
+  "client_email": "vk-bot@smiling-wind-481103-f0.iam.gserviceaccount.com",
+  "client_id": "112407298333590309826",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/vk-bot@smiling-wind-481103-f0.iam.gserviceaccount.com"
+}`;
+
+const SERVICE_ACCOUNT = JSON.parse(serviceAccountJson);
+
 
 /* =======================
    ENV VARIABLES
@@ -12,10 +28,11 @@ const {
   APPLICATION_CHANNEL_ID,
   OFFICER_CHANNEL_ID,
   SHEET_ID,
-  SERVICE_ACCOUNT_JSON
 } = process.env;
 
-const SERVICE_ACCOUNT = JSON.parse(SERVICE_ACCOUNT_JSON);
+
+
+
 
 /* =======================
    CONSTANTS
