@@ -1,0 +1,26 @@
+entrypoint = "index.js"
+modules = ["nodejs-22"]
+hidden = [".config", "package-lock.json"]
+
+[gitHubImport]
+requiredFiles = [".replit", "replit.nix", "package.json", "package-lock.json"]
+
+[nix]
+channel = "stable-24_11"
+
+[deployment]
+run = ["node", "index.js"]
+deploymentTarget = "autoscale"
+ignorePorts = false
+
+[agent]
+expertMode = true
+
+[userenv]
+
+[userenv.shared]
+NODE_OPTIONS = "--openssl-legacy-provider"
+
+language = "nodejs"
+run = "node index.js"
+nvm = "18"
